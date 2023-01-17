@@ -11,8 +11,11 @@ from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
+from typing import Tuple
 
+from loguru import logger
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -34,7 +37,10 @@ from utils.torch_utils import torch_distributed_zero_first
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng', 'webp', 'mpo']  # acceptable image suffixes
 vid_formats = ['mov', 'avi', 'mp4', 'mpg', 'mpeg', 'm4v', 'wmv', 'mkv']  # acceptable video suffixes
-logger = logging.getLogger(__name__)
+
+SLICE_STRIDE = (120, 120)
+
+# logger = logging.getLogger(__name__)
 
 # Get orientation exif tag
 for orientation in ExifTags.TAGS.keys():
@@ -350,6 +356,84 @@ def img2label_paths(img_paths):
     return ['txt'.join(x.replace(sa, sb, 1).rsplit(x.split('.')[-1], 1)) for x in img_paths]
 
 
+def slice_label(crop_rect, labels, size0, iou_threshold: float = 0.35):
+    """
+    filter out those annotated labels inside crop_rect.
+    Args:
+        crop_rect: (origin_w, origin_h, x_min, y_min, x_max, y_max)
+        labels: list of [cls, x_center_normed, y_center_normed, width_normed, height_normd]
+        size0: original size of slice
+        iou_threshold: threshold to decide annotate boxes outside/ inside crop_rect
+
+    Returns:
+        labels: normed, like input
+    """
+
+    w0, h0 = size0 # size of slice
+    origin_w, origin_h = crop_rect[:2] # size of big original image
+
+    # label
+    col_id, row_id = crop_rect[2:4]
+    labels_reverse_normed = labels.copy() * np.array([1, origin_w, origin_h, origin_w, origin_h])[None, :]
+    labels_reverse_normed[:, 1:] = xywh2xyxy(labels_reverse_normed[:, 1:])
+
+    # get annotated labels inside
+    inside_indices = get_shape_inside_indices(
+        labels_reverse_normed[:, 1:],
+        tuple(crop_rect[2:]),
+        iou_threshold
+    )
+    new_labels = labels_reverse_normed[inside_indices]
+
+    # new labels
+    # subtract by offset
+    # xyxy format
+    new_labels = new_labels - np.array([0, col_id, row_id, col_id, row_id])[None, :]
+    new_labels[:, [1, 3]] = np.clip(new_labels[:, [1, 3]], 0, w0)
+    new_labels[:, [2, 4]] = np.clip(new_labels[:, [2, 4]], 0, h0)
+
+    # xywh format (x, y is center)
+    new_labels[:, 1:] = xyxy2xywh(new_labels[:, 1:])
+
+    # normalized
+    new_labels = new_labels / np.array([1, w0, h0, w0, h0])[None, :]
+    labels = new_labels.copy()
+    # end <<<<
+
+    return labels
+
+
+def get_shape_inside_indices(shapes: np.ndarray, rect: Tuple, iou_threshold: float = 0.35):
+    """
+    return list of valid id, which laid inside the rect.
+
+    Args:
+        shapes:
+        rect:
+        iou_threshold:
+
+    Returns:
+
+    """
+
+    x_min, y_min, x_max, y_max = rect
+
+    xx_min = np.maximum(shapes[:, 0], x_min)
+    yy_min = np.maximum(shapes[:, 1], y_min)
+    xx_max = np.minimum(shapes[:, 2], x_max)
+    yy_max = np.minimum(shapes[:, 3], y_max)
+
+    w = np.maximum(0.0, xx_max - xx_min + 1)
+    h = np.maximum(0.0, yy_max - yy_min + 1)
+    inter = w * h
+    shape_area = (shapes[:,3] - shapes[:, 1] + 1) * (shapes[:, 2] - shapes[:, 0] + 1)
+
+    ious = inter / shape_area
+    valid_ids = np.where(ious > iou_threshold)[0]
+
+    return valid_ids
+
+
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
@@ -361,8 +445,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
-        self.path = path        
-        #self.albumentations = Albumentations() if augment else None
+        self.path = path
+        self.slice_stride = (480, 480)
 
         try:
             f = []  # image files
@@ -447,6 +531,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
+        logger.info("force cache_imges to true!")
         if cache_images:
             if cache_images == 'disk':
                 self.im_cache_dir = Path(Path(self.img_files[0]).parent.as_posix() + '_npy')
@@ -454,7 +539,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 self.im_cache_dir.mkdir(parents=True, exist_ok=True)
             gb = 0  # Gigabytes of cached images
             self.img_hw0, self.img_hw = [None] * n, [None] * n
-            results = ThreadPool(8).imap(lambda x: load_image(*x), zip(repeat(self), range(n)))
+            results = ThreadPool(8).imap(lambda x: load_image_origin(*x), zip(repeat(self), range(n)))
             pbar = tqdm(enumerate(results), total=n)
             for i, x in pbar:
                 if cache_images == 'disk':
@@ -466,6 +551,34 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     gb += self.imgs[i].nbytes
                 pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB)'
             pbar.close()
+
+        # calculate slices
+        window = (self.img_size, self.img_size)
+        slices_indices = []
+        for i in range(n):
+            h0, w0 = self.img_hw0[i]
+
+            n_row = h0 // self.slice_stride[1] + 1
+            n_col = w0 // self.slice_stride[0] + 1
+            for row_id in range(n_row):
+                for col_id in range(n_col):
+                    # iterate through slice
+                    row_pixel = row_id * self.slice_stride[1]
+                    col_pixel = col_id * self.slice_stride[0]
+
+                    # choose crop slice
+                    crop_rect = [
+                        col_pixel, row_pixel, col_pixel + window[0], row_pixel + window[1]
+                    ]
+                    crop_rect[2] = min(crop_rect[2], w0)
+                    crop_rect[3] = min(crop_rect[3], h0)
+
+                    # push the  origin size
+                    crop_rect = [w0, h0] + crop_rect
+
+                    slices_indices += [(i, crop_rect)]
+        self.slice_indices = slices_indices
+        self.indices = range(len(self.slice_indices))
 
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
@@ -523,7 +636,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         return x
 
     def __len__(self):
-        return len(self.img_files)
+        return len(self.slice_indices)
+        # return len(self.img_files) * APPROX_N_SLICE_PER_FILE
 
     # def __iter__(self):
     #     self.count = -1
@@ -531,11 +645,14 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     #     #self.shuffled_vector = np.random.permutation(self.nF) if self.augment else np.arange(self.nF)
     #     return self
 
+    @logger.catch
     def __getitem__(self, index):
-        index = self.indices[index]  # linear, shuffled, or image_weights
+        img_index, crop_rect = self.slice_indices[index]
 
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
+
+        # TODO: currently turn it off
         if mosaic:
             # Load mosaic
             if random.random() < 0.8:
@@ -557,13 +674,17 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         else:
             # Load image
             img, (h0, w0), (h, w) = load_image(self, index)
+            labels = self.labels[img_index].copy()
+
+            # slice labels
+            labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.35)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            labels = self.labels[index].copy()
+            # labels = self.labels[index].copy()
             if labels.size:  # normalized xywh to pixel xyxy format
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
@@ -626,7 +747,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
-        return torch.from_numpy(img), labels_out, self.img_files[index], shapes
+        return torch.from_numpy(img), labels_out, self.img_files[img_index], shapes
 
     @staticmethod
     def collate_fn(batch):
@@ -663,21 +784,78 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
 
 # Ancillary functions --------------------------------------------------------------------------------------------------
-def load_image(self, index):
+def load_image_all_slices(self, index, stride) :
+    path = self.img_files[index]
+    img = cv2.imread(path)  # BGR
+    assert img is not None, 'Image Not Found ' + path
+
+    h0, w0 = img.shape[:2]  # orig hw
+    origin_size = [w0, h0]
+    window = (self.img_size, self.img_size)
+
+    #
+    # list of (image, (h0, w0), (h, w), crop_rect)
+    # ~ (h0,w0) is size of slice, (h, w) is after resized
+    # where crop_rect: (origin)
+    results = []
+    for row_id in range(h0 // stride[1] + 1):
+        for col_id in range(w0 // stride[0] + 1):
+            # iterate through slice
+            row_id = row_id * window[1]
+            col_id = col_id * window[0]
+
+            # choose crop slice
+            crop_rect = [col_id, row_id, col_id + window[0], row_id + window[1]]
+            crop_rect[2] = min(crop_rect[2], w0)
+            crop_rect[3] = min(crop_rect[3], h0)
+
+            # update image, h0, w0
+            img = img[crop_rect[1]:crop_rect[3], crop_rect[0]:crop_rect[2]]
+            h0, w0 = img.shape[:2]
+            # end <<<
+
+            # resize the slice
+            r = self.img_size / max(h0, w0)  # resize image to img_size
+            if r != 1:  # always resize down, only resize up if training with augmentation
+                interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
+                img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+            crop_rect = origin_size + crop_rect
+
+            # add to db
+            results += [img, (h0, w0), img.shape[:2], crop_rect]
+
+    return results
+
+
+def load_image_origin(self, index):
+    path = self.img_files[index]
+    img = cv2.imread(path)  # BGR
+    assert img is not None, 'Image Not Found ' + path
+    h0, w0 = img.shape[:2]  # orig hw
+
+    return img, (h0, w0), img.shape[:2] # img, hw_original, hw_resized
+
+
+def load_image(self, index, is_resized=True):
     # loads 1 image from dataset, returns img, original hw, resized hw
-    img = self.imgs[index]
-    if img is None:  # not cached
-        path = self.img_files[index]
-        img = cv2.imread(path)  # BGR
-        assert img is not None, 'Image Not Found ' + path
-        h0, w0 = img.shape[:2]  # orig hw
-        r = self.img_size / max(h0, w0)  # resize image to img_size
-        if r != 1:  # always resize down, only resize up if training with augmentation
-            interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
-            img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
-        return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
-    else:
-        return self.imgs[index], self.img_hw0[index], self.img_hw[index]  # img, hw_original, hw_resized
+    img_index, crop_rect = self.slice_indices[index]
+
+    img = self.imgs[img_index].copy()
+    assert img is not None
+
+    crop_rect = crop_rect[2:] # (x_min, y_min, x_max, y_max)
+
+    # update image, h0, w0
+    img = img[crop_rect[1]:crop_rect[3], crop_rect[0]:crop_rect[2]]
+    h0, w0 = img.shape[:2]
+    # end <<<
+
+    r = self.img_size / max(h0, w0)  # resize image to img_size
+    if r != 1:  # always resize down, only resize up if training with augmentation
+        interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
+        img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+
+    return img, (h0, w0), img.shape[:2]
 
 
 def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
@@ -714,7 +892,8 @@ def load_mosaic(self, index):
     indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
     for i, index in enumerate(indices):
         # Load image
-        img, _, (h, w) = load_image(self, index)
+        img_index, crop_rect = self.slice_indices[index]
+        img, (h0, w0), (h, w) = load_image(self, index)
 
         # place img in img4
         if i == 0:  # top left
@@ -736,7 +915,8 @@ def load_mosaic(self, index):
         padh = y1a - y1b
 
         # Labels
-        labels, segments = self.labels[index].copy(), self.segments[index].copy()
+        labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
+        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.4)
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
@@ -752,6 +932,7 @@ def load_mosaic(self, index):
     # Augment
     #img4, labels4, segments4 = remove_background(img4, labels4, segments4)
     #sample_segments(img4, labels4, segments4, probability=self.hyp['copy_paste'])
+
     img4, labels4, segments4 = copy_paste(img4, labels4, segments4, probability=self.hyp['copy_paste'])
     img4, labels4 = random_perspective(img4, labels4, segments4,
                                        degrees=self.hyp['degrees'],
@@ -772,7 +953,8 @@ def load_mosaic9(self, index):
     indices = [index] + random.choices(self.indices, k=8)  # 8 additional image indices
     for i, index in enumerate(indices):
         # Load image
-        img, _, (h, w) = load_image(self, index)
+        img_index, crop_rect = self.slice_indices[index]
+        img, (h0, w0), (h, w) = load_image(self, index)
 
         # place img in img9
         if i == 0:  # center
@@ -800,7 +982,8 @@ def load_mosaic9(self, index):
         x1, y1, x2, y2 = [max(x, 0) for x in c]  # allocate coords
 
         # Labels
-        labels, segments = self.labels[index].copy(), self.segments[index].copy()
+        labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
+        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.4)
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padx, pady)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padx, pady) for x in segments]
@@ -827,7 +1010,6 @@ def load_mosaic9(self, index):
     # img9, labels9 = replicate(img9, labels9)  # replicate
 
     # Augment
-    #img9, labels9, segments9 = remove_background(img9, labels9, segments9)
     img9, labels9, segments9 = copy_paste(img9, labels9, segments9, probability=self.hyp['copy_paste'])
     img9, labels9 = random_perspective(img9, labels9, segments9,
                                        degrees=self.hyp['degrees'],
@@ -849,7 +1031,8 @@ def load_samples(self, index):
     indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
     for i, index in enumerate(indices):
         # Load image
-        img, _, (h, w) = load_image(self, index)
+        img_index, crop_rect = self.slice_indices[index]
+        img, (h0, w0), (h, w) = load_image(self, index)
 
         # place img in img4
         if i == 0:  # top left
@@ -871,7 +1054,8 @@ def load_samples(self, index):
         padh = y1a - y1b
 
         # Labels
-        labels, segments = self.labels[index].copy(), self.segments[index].copy()
+        labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
+        labels = slice_label(crop_rect, labels, (w0, h0))
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
@@ -890,7 +1074,7 @@ def load_samples(self, index):
 
     return sample_labels, sample_images, sample_masks
 
-
+@logger.catch
 def copy_paste(img, labels, segments, probability=0.5):
     # Implement Copy-Paste augmentation https://arxiv.org/abs/2012.07177, labels as nx5 np.array(cls, xyxy)
     n = len(segments)
@@ -1318,3 +1502,62 @@ def load_segmentations(self, index):
     #print(key)
     # /work/handsomejw66/coco17/
     return self.segs[key]
+
+
+if __name__ == '__main__':
+    import yaml
+    from yaml.loader import SafeLoader
+    from torch.utils.data import DataLoader
+
+    path = "/home/kancy/Desktop/okamura_dataset/yolo_train_data_big/val"
+    hyp_augment_path = "/home/kancy/Desktop/projects/yolov7/data/hyp.scratch.p6.yaml"
+
+    with open(hyp_augment_path) as f:
+        hyp_augment_data = yaml.load(f, Loader=SafeLoader)
+
+    dataset = LoadImagesAndLabels(path, img_size=1280, batch_size=2, augment=True, hyp=hyp_augment_data, cache_images=True)
+    loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=LoadImagesAndLabels.collate_fn)
+
+    color_palettes = [
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255)
+    ]
+
+    max_count = 100
+    os.makedirs("output", exist_ok=True)
+
+    for bi, batch_data in enumerate(loader):
+
+        images_batch = batch_data[0]
+        labels_batch = batch_data[1].cpu().numpy()
+        for i, image in enumerate(images_batch):
+
+            # stop if exceed
+            if max_count < 0:
+                exit(0)
+
+            image_np = image.permute(1,2,0).cpu().numpy().copy()
+            h, w = image_np.shape[:2]
+
+            labels = labels_batch[labels_batch[:, 0] == i][:, 1:] # (cls, x_center, y_center, width, height)
+            labels = labels * np.array([1, w, h, w, h])[None, :].astype(int)
+
+            # draw rectangles
+            for label in labels:
+                cls, x_center, y_center, width, height = label
+                x_min = int(x_center - width / 2)
+                y_min = int(y_center - height / 2)
+                x_max = int(x_center + width / 2)
+                y_max = int(y_center + height / 2)
+
+                color = color_palettes[int(cls) % len(color_palettes)]
+
+                cv2.rectangle(image_np, (x_min, y_min), (x_max, y_max), color, thickness=2)
+
+            # show
+            cv2.imwrite(f"./output/{max_count}.png", image_np)
+            max_count -= 1
+
+            print (max_count)
