@@ -437,6 +437,13 @@ def get_shape_inside_indices(shapes: np.ndarray, rect: Tuple, iou_threshold: flo
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
+
+        # force some parameters
+        logger.info("force cache_imges to true!")
+        cache_images = True
+        rect = False
+        # end <<<
+
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -531,7 +538,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
-        logger.info("force cache_imges to true!")
+
+
         if cache_images:
             if cache_images == 'disk':
                 self.im_cache_dir = Path(Path(self.img_files[0]).parent.as_posix() + '_npy')
@@ -653,7 +661,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         mosaic = self.mosaic and random.random() < hyp['mosaic']
 
         # TODO: currently turn it off
-        if mosaic:
+        if mosaic and False:
             # Load mosaic
             if random.random() < 0.8:
                 img, labels = load_mosaic(self, index)
