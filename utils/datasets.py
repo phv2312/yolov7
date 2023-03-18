@@ -356,7 +356,7 @@ def img2label_paths(img_paths):
     return ['txt'.join(x.replace(sa, sb, 1).rsplit(x.split('.')[-1], 1)) for x in img_paths]
 
 
-def slice_label(crop_rect, labels, size0, iou_threshold: float = 0.35):
+def slice_label(crop_rect, labels, size0, iou_threshold: float = 0.65):
     """
     filter out those annotated labels inside crop_rect.
     Args:
@@ -368,7 +368,6 @@ def slice_label(crop_rect, labels, size0, iou_threshold: float = 0.35):
     Returns:
         labels: normed, like input
     """
-
     w0, h0 = size0 # size of slice
     origin_w, origin_h = crop_rect[:2] # size of big original image
 
@@ -453,7 +452,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
-        self.slice_stride = (480, 480)
+        self.slice_stride = (48, 48)
+        window = (self.img_size, self.img_size)
+        self.slice_iou_threshold = 0.7
 
         try:
             f = []  # image files
@@ -539,7 +540,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
 
-
         if cache_images:
             if cache_images == 'disk':
                 self.im_cache_dir = Path(Path(self.img_files[0]).parent.as_posix() + '_npy')
@@ -561,7 +561,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             pbar.close()
 
         # calculate slices
-        window = (self.img_size, self.img_size)
+
         slices_indices = []
         for i in range(n):
             h0, w0 = self.img_hw0[i]
@@ -645,13 +645,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
     def __len__(self):
         return len(self.slice_indices)
-        # return len(self.img_files) * APPROX_N_SLICE_PER_FILE
-
-    # def __iter__(self):
-    #     self.count = -1
-    #     print('ran dataset iter')
-    #     #self.shuffled_vector = np.random.permutation(self.nF) if self.augment else np.arange(self.nF)
-    #     return self
 
     @logger.catch
     def __getitem__(self, index):
@@ -660,7 +653,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
 
-        # TODO: currently turn it off
         if mosaic and False:
             # Load mosaic
             if random.random() < 0.8:
@@ -685,7 +677,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             labels = self.labels[img_index].copy()
 
             # slice labels
-            labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.35)
+            labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=self.slice_iou_threshold)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
@@ -924,7 +916,7 @@ def load_mosaic(self, index):
 
         # Labels
         labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
-        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.4)
+        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=self.slice_iou_threshold)
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
@@ -991,7 +983,7 @@ def load_mosaic9(self, index):
 
         # Labels
         labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
-        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=0.4)
+        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=self.slice_iou_threshold)
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padx, pady)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padx, pady) for x in segments]
@@ -1063,7 +1055,7 @@ def load_samples(self, index):
 
         # Labels
         labels, segments = self.labels[img_index].copy(), self.segments[img_index].copy()
-        labels = slice_label(crop_rect, labels, (w0, h0))
+        labels = slice_label(crop_rect, labels, (w0, h0), iou_threshold=self.slice_iou_threshold)
         if labels.size:
             labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
@@ -1517,7 +1509,7 @@ if __name__ == '__main__':
     from yaml.loader import SafeLoader
     from torch.utils.data import DataLoader
 
-    path = "/home/kancy/Desktop/okamura_dataset/yolo_train_data_big/val"
+    path = "/home/kancy/Desktop/okamura_dataset/yolo_train_data_big/"
     hyp_augment_path = "/home/kancy/Desktop/projects/yolov7/data/hyp.scratch.p6.yaml"
 
     with open(hyp_augment_path) as f:
@@ -1533,7 +1525,7 @@ if __name__ == '__main__':
         (255, 0, 255)
     ]
 
-    max_count = 100
+    max_count = 300
     os.makedirs("output", exist_ok=True)
 
     for bi, batch_data in enumerate(loader):

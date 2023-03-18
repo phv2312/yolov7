@@ -5,14 +5,33 @@ import json
 import numpy as np
 import math
 
-LABELS_ACCEPTED = ['chair', 'desk', 'cabinet', 'conference_chair', 'conference_desk']
+
+LABELS_ACCEPTED = [
+    'closed_workbooth', #6
+    'conference_desk', #2
+    'chair', #1
+    'sofa_desk', #5
+    'conference_sofa', #3
+    'desk', #2
+    'sofa', #3
+    'cabinet' #4
+]
+
+LABELS_MAPPER = {
+    'conference_desk': 'desk',
+    'conference_sofa': 'sofa'
+}
 
 
 def get_shape(json_data):
     shapes = json_data['shapes']
-    chair_results = []
-    desk_results = []
-    cabinet_results = []
+    chair_results = [] # 1
+    desk_results = [] # 2
+    sofa_results = []  # 3
+    cabinet_results = [] # 4
+    sofa_desk_results = [] # 5
+    closed_workbooth_results = [] # 6
+
     for shape in shapes:
         label = shape['label']
         if label not in LABELS_ACCEPTED:
@@ -33,23 +52,31 @@ def get_shape(json_data):
         else:
             x_min, y_min, width, height = cv2.boundingRect(points[:, None, :])
 
-        if label in ['chair', 'conference_chair']:
+        if label in ['chair']:
             chair_results += [(x_min, y_min, x_min + width, y_min + height)]
         elif label in ['desk', 'conference_desk']:
             desk_results += [(x_min, y_min, x_min + width, y_min + height)]
-        elif label == 'cabinet':
+        elif label in ['sofa']:
+            sofa_results += [(x_min, y_min, x_min + width, y_min + height)]
+        elif label in ['cabinet']:
             cabinet_results += [(x_min, y_min, x_min + width, y_min + height)]
-
+        elif label in ['sofa_desk']:
+            sofa_desk_results += [(x_min, y_min, x_min + width, y_min + height)]
+        elif label in ['closed_workbooth']:
+            closed_workbooth_results += [(x_min, y_min, x_min + width, y_min + height)]
     return (
         np.array(chair_results).astype(np.float32),
         np.array(desk_results).astype(np.float32),
-        np.array(cabinet_results).astype(np.float32)
+        np.array(sofa_results).astype(np.float32),
+        np.array(cabinet_results).astype(np.float32),
+        np.array(sofa_desk_results).astype(np.float32),
+        np.array(closed_workbooth_results).astype(np.float32)
     )
 
 
 if __name__ == '__main__':
-    image_dir = "/home/kancy/Desktop/okamura_dataset/v021/all"
-    label_dir = "/home/kancy/Desktop/okamura_dataset/v021/all"
+    image_dir = "/home/kancy/Desktop/okamura_dataset/v0302_w_synthesis_blur_external/all"
+    label_dir = "/home/kancy/Desktop/okamura_dataset/v0302_w_synthesis_blur_external/all"
     split_json_path = "/home/kancy/Desktop/okamura_dataset/split.json"
     output_dir = "/home/kancy/Desktop/okamura_dataset/yolo_train_data_big"
 
@@ -57,9 +84,8 @@ if __name__ == '__main__':
     split_data = json.load(open(split_json_path, 'r'))
 
     for dir_name in ['train', 'val']:
-        dir_abs_path = os.path.join(output_dir, dir_name)
-        output_image_dir = os.path.join(dir_abs_path, 'images')
-        output_label_dir = os.path.join(dir_abs_path, 'labels')
+        output_image_dir = os.path.join(output_dir, 'images', dir_name)
+        output_label_dir = os.path.join(output_dir, 'labels', dir_name)
 
         os.makedirs(output_image_dir, exist_ok=True)
         os.makedirs(output_label_dir, exist_ok=True)
@@ -83,19 +109,19 @@ if __name__ == '__main__':
         image = cv2.imread(image_path, 3)
         image_h, image_w = image.shape[:2]
         json_data = json.load(open(json_path, 'r'))
-        chairs, desks, cabinets = get_shape(json_data)
+        chairs, desks, sofas, cabinets, sofa_desks, closed_workbooths = get_shape(json_data)
 
-        if basename in split_data['train']:
-            # train
-            output_image_dir_ = os.path.join(output_dir, 'train', 'images')
-            output_label_dir_ = os.path.join(output_dir, 'train', 'labels')
-        else:
+        if basename in split_data['test']:
             # val
             if rotate_degree != 0:
                 continue
 
-            output_image_dir_ = os.path.join(output_dir, 'val', 'images')
-            output_label_dir_ = os.path.join(output_dir, 'val', 'labels')
+            output_image_dir_ = os.path.join(output_dir, 'images', 'val')
+            output_label_dir_ = os.path.join(output_dir, 'labels', 'val')
+        else:
+            # train
+            output_image_dir_ = os.path.join(output_dir, 'images', 'train')
+            output_label_dir_ = os.path.join(output_dir, 'labels', 'train')
 
         # write image
         basename_annot = f"{basename}_r{rotate_degree}_{count}"
@@ -108,7 +134,7 @@ if __name__ == '__main__':
         writer = open(os.path.join(output_label_dir_, f"{basename_annot}.txt"), 'w')
 
         # write
-        for ci, objects_ in enumerate([chairs, desks, cabinets]):
+        for ci, objects_ in enumerate([chairs, desks, sofas, cabinets, sofa_desks, closed_workbooths]):
             for object_ in objects_:
                 x_min, y_min, x_max, y_max = object_
                 x_center = (x_min + x_max) / 2
