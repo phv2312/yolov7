@@ -452,7 +452,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
-        self.slice_stride = (48, 48)
+        self.slice_stride = (48 * 4, 48 * 4)
         window = (self.img_size, self.img_size)
         self.slice_iou_threshold = 0.7
 
