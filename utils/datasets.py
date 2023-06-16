@@ -38,8 +38,6 @@ help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng', 'webp', 'mpo']  # acceptable image suffixes
 vid_formats = ['mov', 'avi', 'mp4', 'mpg', 'mpeg', 'm4v', 'wmv', 'mkv']  # acceptable video suffixes
 
-SLICE_STRIDE = (120, 120)
-
 # logger = logging.getLogger(__name__)
 
 # Get orientation exif tag
@@ -435,7 +433,7 @@ def get_shape_inside_indices(shapes: np.ndarray, rect: Tuple, iou_threshold: flo
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', random_add_offset=False):
 
         # force some parameters
         logger.info("force cache_imges to true!")
@@ -452,9 +450,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
-        self.slice_stride = (48 * 4, 48 * 4)
+        self.slice_stride = (48 * 10, 48 * 10)
         window = (self.img_size, self.img_size)
-        self.slice_iou_threshold = 0.7
+        self.slice_iou_threshold = 0.5
+        self.random_add_offset = random_add_offset
 
         try:
             f = []  # image files
@@ -653,7 +652,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
 
-        if mosaic and False:
+        if mosaic:
             # Load mosaic
             if random.random() < 0.8:
                 img, labels = load_mosaic(self, index)
@@ -841,14 +840,29 @@ def load_image(self, index, is_resized=True):
     img_index, crop_rect = self.slice_indices[index]
 
     img = self.imgs[img_index].copy()
+    h, w = img.shape[:2]
     assert img is not None
 
     crop_rect = crop_rect[2:] # (x_min, y_min, x_max, y_max)
+    if self.random_add_offset:
+        x_min, y_min, x_max, y_max = crop_rect
+        x_min = max(x_min - random.randint(0, 100), 0)
+        y_min = max(y_min - random.randint(0, 100), 0)
+        x_max = min(x_min + self.img_size, w)
+        y_max = min(y_min + self.img_size, h)
+
+        crop_rect = [x_min, y_min, x_max, y_max]
 
     # update image, h0, w0
     img = img[crop_rect[1]:crop_rect[3], crop_rect[0]:crop_rect[2]]
     h0, w0 = img.shape[:2]
     # end <<<
+
+    if h0 < self.img_size:
+        img = cv2.copyMakeBorder(img, 0, self.img_size - h0, 0, 0, cv2.BORDER_CONSTANT, value=0)
+
+    if w0 < self.img_size:
+        img = cv2.copyMakeBorder(img, 0, 0, 0, self.img_size - w0, cv2.BORDER_CONSTANT, value=0)
 
     r = self.img_size / max(h0, w0)  # resize image to img_size
     if r != 1:  # always resize down, only resize up if training with augmentation
@@ -1509,13 +1523,13 @@ if __name__ == '__main__':
     from yaml.loader import SafeLoader
     from torch.utils.data import DataLoader
 
-    path = "/home/kancy/Desktop/okamura_dataset/yolo_train_data_big/"
+    path = "/media/kancy/partion/okamura/big/yolo_train_data_big/"
     hyp_augment_path = "/home/kancy/Desktop/projects/yolov7/data/hyp.scratch.p6.yaml"
 
     with open(hyp_augment_path) as f:
         hyp_augment_data = yaml.load(f, Loader=SafeLoader)
 
-    dataset = LoadImagesAndLabels(path, img_size=1280, batch_size=2, augment=True, hyp=hyp_augment_data, cache_images=True)
+    dataset = LoadImagesAndLabels(path, img_size=1280, batch_size=2, augment=True, hyp=hyp_augment_data, cache_images=True, random_add_offset=True)
     loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=LoadImagesAndLabels.collate_fn)
 
     color_palettes = [
@@ -1525,7 +1539,7 @@ if __name__ == '__main__':
         (255, 0, 255)
     ]
 
-    max_count = 300
+    max_count = 30
     os.makedirs("output", exist_ok=True)
 
     for bi, batch_data in enumerate(loader):
