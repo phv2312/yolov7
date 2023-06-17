@@ -245,7 +245,7 @@ def train(hyp, opt, device, tb_writer=None):
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), random_add_offset=True)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
@@ -357,13 +357,18 @@ def train(hyp, opt, device, tb_writer=None):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
-                if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
+            try:
+                with amp.autocast(enabled=cuda):
+                    pred = model(imgs)  # forward
+                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
+                    if rank != -1:
+                        loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.
+            except Exception as e:
+                logger.warning(f"Got error during training: {str(e)}")
+                optimizer.zero_grad()
+                continue
 
             # Backward
             scaler.scale(loss).backward()

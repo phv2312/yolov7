@@ -455,7 +455,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         window = (self.img_size, self.img_size)
         self.slice_iou_threshold = 0.5
         self.random_add_offset = random_add_offset
-        logger.info("Random_add_offset:", self.random_add_offset)
+        logger.info(f"Random_add_offset: {self.random_add_offset} ..." )
 
         try:
             f = []  # image files
