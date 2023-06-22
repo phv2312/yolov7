@@ -437,6 +437,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', random_add_offset=False):
 
         # force some parameters
+        random_add_offset = False
         logger.info("force cache_imges to true!")
         cache_images = True
         rect = False
@@ -451,9 +452,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
-        self.slice_stride = (48 * 10, 48 * 10)
+        self.slice_stride = (48 * 15, 48 * 15)
         window = (self.img_size, self.img_size)
-        self.slice_iou_threshold = 0.5
+        self.slice_iou_threshold = 0.43
         self.random_add_offset = random_add_offset
         logger.info(f"Random_add_offset: {self.random_add_offset} ..." )
 
@@ -565,6 +566,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         slices_indices = []
         for i in range(n):
+            label_i = self.labels[i]
             h0, w0 = self.img_hw0[i]
 
             n_row = h0 // self.slice_stride[1] + 1
@@ -585,7 +587,24 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     # push the  origin size
                     crop_rect = [w0, h0] + crop_rect
 
-                    slices_indices += [(i, crop_rect)]
+                    # check if any shapes inside
+                    labels_reverse_normed = label_i * np.array([1, w0, h0, w0, h0])[None,:]
+                    labels_reverse_normed[:, 1:] = xywh2xyxy(labels_reverse_normed[:, 1:])
+
+                    inside_indices = get_shape_inside_indices(
+                        labels_reverse_normed[:, 1:],
+                        tuple(crop_rect[2:]),
+                        self.slice_iou_threshold
+                    )
+                    is_skip = False
+                    if len(inside_indices) < 1:
+                        is_skip = True
+                        if np.random.uniform(0, 1.) < 0.15:
+                            is_skip = False
+
+                    if not is_skip:
+                        slices_indices += [(i, crop_rect)]
+
         self.slice_indices = slices_indices
         self.indices = range(len(self.slice_indices))
 
@@ -859,12 +878,6 @@ def load_image(self, index, is_resized=True):
     img = img[crop_rect[1]:crop_rect[3], crop_rect[0]:crop_rect[2]]
     h0, w0 = img.shape[:2]
     # end <<<
-
-    if h0 < self.img_size:
-        img = cv2.copyMakeBorder(img, 0, self.img_size - h0, 0, 0, cv2.BORDER_CONSTANT, value=0)
-
-    if w0 < self.img_size:
-        img = cv2.copyMakeBorder(img, 0, 0, 0, self.img_size - w0, cv2.BORDER_CONSTANT, value=0)
 
     r = self.img_size / max(h0, w0)  # resize image to img_size
     if r != 1:  # always resize down, only resize up if training with augmentation
@@ -1531,7 +1544,7 @@ if __name__ == '__main__':
     with open(hyp_augment_path) as f:
         hyp_augment_data = yaml.load(f, Loader=SafeLoader)
 
-    dataset = LoadImagesAndLabels(path, img_size=1280, batch_size=2, augment=True, hyp=hyp_augment_data, cache_images=True, random_add_offset=True)
+    dataset = LoadImagesAndLabels(path, img_size=1280, batch_size=2, augment=True, hyp=hyp_augment_data, cache_images=True, random_add_offset=False)
     loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=LoadImagesAndLabels.collate_fn)
 
     color_palettes = [
