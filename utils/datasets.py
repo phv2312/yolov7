@@ -437,7 +437,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                  cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', random_add_offset=False):
 
         # force some parameters
-        random_add_offset = False
+        # random_add_offset = False
         logger.info("force cache_imges to true!")
         cache_images = True
         rect = False
@@ -603,7 +603,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                             is_skip = False
 
                     if not is_skip:
-                        slices_indices += [(i, crop_rect)]
+                        slices_indices += [[i, crop_rect]]
 
         self.slice_indices = slices_indices
         self.indices = range(len(self.slice_indices))
@@ -692,8 +692,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 labels = np.concatenate((labels, labels2), 0)
 
         else:
+            crop_rect = may_add_random_offset(self, crop_rect)
+
             # Load image
-            img, (h0, w0), (h, w) = load_image(self, index)
+            img, (h0, w0), (h, w) = load_image(self, index, crop_rect_new=crop_rect)
+
             labels = self.labels[img_index].copy()
 
             # slice labels
@@ -856,23 +859,31 @@ def load_image_origin(self, index):
     return img, (h0, w0), img.shape[:2] # img, hw_original, hw_resized
 
 
-def load_image(self, index, is_resized=True):
+def may_add_random_offset(self, crop_rect):
+    w0, h0 = crop_rect[:2]
+    if self.random_add_offset:
+        x_min, y_min, x_max, y_max = crop_rect[2:]
+        x_min = max(x_min - random.randint(-50, 50), 0)
+        y_min = max(y_min - random.randint(-50, 50), 0)
+        x_max = min(x_min + self.img_size, w0)
+        y_max = min(y_min + self.img_size, h0)
+
+        crop_rect[2:] = [x_min, y_min, x_max, y_max]
+        # print ('random add offset:', crop_rect)
+    return crop_rect
+
+
+def load_image(self, index, is_resized=True, crop_rect_new = None):
     # loads 1 image from dataset, returns img, original hw, resized hw
     img_index, crop_rect = self.slice_indices[index]
+    if crop_rect_new is not None:
+        crop_rect = crop_rect_new
 
     img = self.imgs[img_index].copy()
     h, w = img.shape[:2]
     assert img is not None
 
     crop_rect = crop_rect[2:] # (x_min, y_min, x_max, y_max)
-    if self.random_add_offset:
-        x_min, y_min, x_max, y_max = crop_rect
-        x_min = max(x_min - random.randint(0, 100), 0)
-        y_min = max(y_min - random.randint(0, 100), 0)
-        x_max = min(x_min + self.img_size, w)
-        y_max = min(y_min + self.img_size, h)
-
-        crop_rect = [x_min, y_min, x_max, y_max]
 
     # update image, h0, w0
     img = img[crop_rect[1]:crop_rect[3], crop_rect[0]:crop_rect[2]]
@@ -922,7 +933,10 @@ def load_mosaic(self, index):
     for i, index in enumerate(indices):
         # Load image
         img_index, crop_rect = self.slice_indices[index]
-        img, (h0, w0), (h, w) = load_image(self, index)
+
+        crop_rect = may_add_random_offset(self, crop_rect)
+
+        img, (h0, w0), (h, w) = load_image(self, index, crop_rect_new=crop_rect)
 
         # place img in img4
         if i == 0:  # top left
@@ -983,7 +997,10 @@ def load_mosaic9(self, index):
     for i, index in enumerate(indices):
         # Load image
         img_index, crop_rect = self.slice_indices[index]
-        img, (h0, w0), (h, w) = load_image(self, index)
+
+        crop_rect = may_add_random_offset(self, crop_rect)
+
+        img, (h0, w0), (h, w) = load_image(self, index, crop_rect_new=crop_rect)
 
         # place img in img9
         if i == 0:  # center
@@ -1061,7 +1078,8 @@ def load_samples(self, index):
     for i, index in enumerate(indices):
         # Load image
         img_index, crop_rect = self.slice_indices[index]
-        img, (h0, w0), (h, w) = load_image(self, index)
+        crop_rect = may_add_random_offset(self, crop_rect)
+        img, (h0, w0), (h, w) = load_image(self, index, crop_rect_new=crop_rect)
 
         # place img in img4
         if i == 0:  # top left
