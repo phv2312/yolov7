@@ -863,13 +863,12 @@ def may_add_random_offset(self, crop_rect):
     w0, h0 = crop_rect[:2]
     if self.random_add_offset:
         x_min, y_min, x_max, y_max = crop_rect[2:]
-        x_min = max(x_min - random.randint(-50, 50), 0)
-        y_min = max(y_min - random.randint(-50, 50), 0)
-        x_max = min(x_min + self.img_size, w0)
-        y_max = min(y_min + self.img_size, h0)
+        x_min = max(x_min - random.randint(0, 50), 0)
+        y_min = max(y_min - random.randint(0, 50), 0)
+        x_max = min(x_min + self.img_size, w0 - 1)
+        y_max = min(y_min + self.img_size, h0 - 1)
 
         crop_rect[2:] = [x_min, y_min, x_max, y_max]
-        # print ('random add offset:', crop_rect)
     return crop_rect
 
 
